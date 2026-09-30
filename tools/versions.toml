@@ -3,8 +3,8 @@
 version = "0.9.146"
 install = "cargo install --locked cargo-nextest@0.9.146"
 [cargo-shear]
-version = "1.14.0"
-install = "cargo install --locked cargo-shear@1.14.0"
+version = "1.11.2"
+install = "cargo install --locked cargo-shear@1.11.2"
 [cargo-deny]
 version = "0.20.2"
 install = "cargo install --locked cargo-deny@0.20.2"
