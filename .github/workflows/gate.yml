@@ -1,0 +1,30 @@
+name: gate
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt clippy llvm-tools --target thumbv7em-none-eabi
+      - name: Branch name
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: cargo xtask branch-name "$HEAD_REF"
+      - name: Install tools
+        run: bash tools/ci-install.sh
+      - name: Gate
+        run: cargo xtask gate
