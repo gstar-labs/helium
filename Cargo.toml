@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 
+[lib]
+test = false
+doctest = false
+
 [workspace]
 resolver = "3"
 members = [".", "xtask"]
