@@ -1,5 +1,3 @@
-use core::marker::PhantomData;
-
 use crate::operation::{Operation, OperationId, State};
 use crate::resource::{Resource, ResourceId};
 
@@ -36,7 +34,9 @@ pub enum Error {
 /// private so callers cannot publish a value without the model transition.
 #[derive(Clone, Copy)]
 pub struct Stage<T: Copy> {
-    marker: PhantomData<T>,
+    owner: Option<OperationId>,
+    resource: Option<ResourceId>,
+    value: Option<T>,
 }
 
 impl<T: Copy> Stage<T> {
@@ -44,7 +44,9 @@ impl<T: Copy> Stage<T> {
     #[must_use]
     pub const fn empty() -> Self {
         Self {
-            marker: PhantomData,
+            owner: None,
+            resource: None,
+            value: None,
         }
     }
 }
@@ -59,7 +61,7 @@ impl<T: Copy> Stage<T> {
 pub struct Model<'a, T: Copy> {
     resources: &'a mut [Resource<T>],
     operations: &'a mut [Operation<'a>],
-    _stages: &'a mut [Stage<T>],
+    stages: &'a mut [Stage<T>],
 }
 
 impl<'a, T: Copy> Model<'a, T> {
@@ -73,7 +75,7 @@ impl<'a, T: Copy> Model<'a, T> {
         Self {
             resources,
             operations,
-            _stages: stages,
+            stages,
         }
     }
 
@@ -128,6 +130,113 @@ impl<'a, T: Copy> Model<'a, T> {
     /// identity.
     pub fn inspect(&self, resource: ResourceId) -> Result<T, Error> {
         Ok(self.resource(resource)?.value())
+    }
+
+    /// Reads the committed value of a resource declared for reading.
+    ///
+    /// A staged replacement is intentionally not visible through this method;
+    /// use [`Self::view`] to read an operation's private candidate instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity, lifecycle, or declaration error without exposing
+    /// staged state.
+    pub fn read(&self, operation: OperationId, resource: ResourceId) -> Result<T, Error> {
+        let declared_read = {
+            let operation = self.operation(operation)?;
+            if operation.state != State::Running {
+                return Err(Error::WrongState);
+            }
+            operation.reads.unwrap_or(&[]).contains(&resource)
+        };
+        let resource = self.resource(resource)?;
+        if !declared_read {
+            return Err(Error::UndeclaredRead);
+        }
+        Ok(resource.value())
+    }
+
+    /// Reads the value visible to an operation, including its own staged value.
+    ///
+    /// A write-only resource has no readable committed value, but becomes
+    /// visible through this method after the operation stages its replacement.
+    /// Other operations never see a private staged value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity, lifecycle, or declaration error without changing
+    /// any state.
+    pub fn view(&self, operation: OperationId, resource: ResourceId) -> Result<T, Error> {
+        let (declared_read, declared_write) = {
+            let operation = self.operation(operation)?;
+            if operation.state != State::Running {
+                return Err(Error::WrongState);
+            }
+            let reads = operation.reads.unwrap_or(&[]);
+            let writes = operation.writes.unwrap_or(&[]);
+            (reads.contains(&resource), writes.contains(&resource))
+        };
+        let resource_value = self.resource(resource)?.value();
+        if !declared_read && !declared_write {
+            return Err(Error::UndeclaredRead);
+        }
+        if declared_write {
+            for stage in self.stages.iter() {
+                if stage.owner == Some(operation)
+                    && stage.resource == Some(resource)
+                    && let Some(value) = stage.value
+                {
+                    return Ok(value);
+                }
+            }
+        }
+        if declared_read {
+            return Ok(resource_value);
+        }
+        Err(Error::UndeclaredRead)
+    }
+
+    /// Stages a private replacement for a declared write resource.
+    ///
+    /// Restaging replaces the operation's existing candidate in place, so it
+    /// does not require another caller-provided staging slot. A new candidate
+    /// consumes one empty slot and has no committed effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity, lifecycle, declaration, or capacity error without
+    /// changing any existing stage.
+    pub fn stage(
+        &mut self,
+        operation: OperationId,
+        resource: ResourceId,
+        value: T,
+    ) -> Result<(), Error> {
+        let declared_write = {
+            let operation_state = self.operation(operation)?;
+            if operation_state.state != State::Running {
+                return Err(Error::WrongState);
+            }
+            operation_state.writes.unwrap_or(&[]).contains(&resource)
+        };
+        self.resource(resource)?;
+        if !declared_write {
+            return Err(Error::UndeclaredWrite);
+        }
+
+        for stage in self.stages.iter_mut() {
+            if stage.owner == Some(operation) && stage.resource == Some(resource) {
+                stage.value = Some(value);
+                return Ok(());
+            }
+        }
+        let Some(stage) = self.stages.iter_mut().find(|stage| stage.owner.is_none()) else {
+            return Err(Error::Capacity);
+        };
+        stage.owner = Some(operation);
+        stage.resource = Some(resource);
+        stage.value = Some(value);
+        Ok(())
     }
 
     /// Admits a ready operation when its complete footprint is compatible
