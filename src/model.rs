@@ -286,6 +286,116 @@ impl<'a, T: Copy> Model<'a, T> {
         Ok(())
     }
 
+    /// Publishes all private writes for a running operation and releases its
+    /// complete reservation.
+    ///
+    /// Every stage is checked before the first committed value is changed.
+    /// A successful commit clears the operation's stages and makes its
+    /// terminal state visible as [`State::Committed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity or lifecycle error, or a declaration error for a
+    /// corrupted stage, without publishing a partial result.
+    pub fn commit(&mut self, operation: OperationId) -> Result<(), Error> {
+        let (writes, state) = {
+            let operation = self.operation(operation)?;
+            (operation.writes.unwrap_or(&[]), operation.state)
+        };
+        if state != State::Running {
+            return Err(Error::WrongState);
+        }
+
+        for stage in self.stages.iter() {
+            if stage.owner != Some(operation) {
+                continue;
+            }
+            let Some(resource) = stage.resource else {
+                return Err(Error::UndeclaredWrite);
+            };
+            if stage.value.is_none() {
+                return Err(Error::UndeclaredWrite);
+            }
+            if !writes.contains(&resource) {
+                return Err(Error::UndeclaredWrite);
+            }
+            self.resource(resource)?;
+        }
+
+        for stage in self.stages.iter() {
+            if stage.owner != Some(operation) {
+                continue;
+            }
+            if let (Some(resource), Some(value)) = (stage.resource, stage.value) {
+                self.resources[resource.slot()].set_value(value);
+            }
+        }
+        self.clear_stages(operation);
+        self.operation_mut(operation)?.state = State::Committed;
+        Ok(())
+    }
+
+    /// Discards an operation's private writes and releases its reservation.
+    ///
+    /// Ready operations may be aborted before admission; running operations
+    /// release their complete reservation. The terminal state is
+    /// [`State::Failed`] until explicit recycling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity or lifecycle error without changing the operation.
+    pub fn abort(&mut self, operation: OperationId) -> Result<(), Error> {
+        let state = self.operation(operation)?.state;
+        if state != State::Ready && state != State::Running {
+            return Err(Error::WrongState);
+        }
+        self.clear_stages(operation);
+        self.operation_mut(operation)?.state = State::Failed;
+        Ok(())
+    }
+
+    /// Recycles a committed or failed terminal operation slot.
+    ///
+    /// Recycling clears its declaration and advances the operation
+    /// generation, making prior identities stale. Generation overflow is
+    /// rejected without changing the terminal operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity, lifecycle, or generation-overflow error without
+    /// changing the slot on failure.
+    pub fn recycle(&mut self, operation: OperationId) -> Result<(), Error> {
+        let (state, generation) = {
+            let operation_slot = self.operation(operation)?;
+            (operation_slot.state, operation_slot.generation)
+        };
+        if state != State::Committed && state != State::Failed {
+            return Err(Error::WrongState);
+        }
+        if self
+            .stages
+            .iter()
+            .any(|stage| stage.owner == Some(operation))
+        {
+            return Err(Error::WrongState);
+        }
+        let generation = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
+        let operation_slot = self.operation_mut(operation)?;
+        operation_slot.reads = None;
+        operation_slot.writes = None;
+        operation_slot.generation = generation;
+        operation_slot.state = State::Vacant;
+        Ok(())
+    }
+
+    fn clear_stages(&mut self, operation: OperationId) {
+        for stage in self.stages.iter_mut() {
+            if stage.owner == Some(operation) {
+                *stage = Stage::empty();
+            }
+        }
+    }
+
     fn overlaps(left: &[ResourceId], right: &[ResourceId]) -> bool {
         left.iter()
             .any(|resource| right.iter().any(|other| resource.slot() == other.slot()))

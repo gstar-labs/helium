@@ -49,4 +49,8 @@ impl<T: Copy> Resource<T> {
     pub(crate) const fn value(&self) -> T {
         self.value
     }
+
+    pub(crate) fn set_value(&mut self, value: T) {
+        self.value = value;
+    }
 }
