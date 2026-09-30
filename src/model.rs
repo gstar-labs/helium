@@ -130,6 +130,58 @@ impl<'a, T: Copy> Model<'a, T> {
         Ok(self.resource(resource)?.value())
     }
 
+    /// Admits a ready operation when its complete footprint is compatible
+    /// with every currently running operation.
+    ///
+    /// A reservation is derived from the complete declaration. A conflict
+    /// therefore leaves the operation ready and does not reserve any part of
+    /// its footprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operation identity, lifecycle, resource identity, or
+    /// admission conflict error without changing the candidate state unless
+    /// admission succeeds.
+    pub fn admit(&mut self, operation: OperationId) -> Result<(), Error> {
+        let (reads, writes) = {
+            let candidate = self.operation(operation)?;
+            if candidate.state != State::Ready {
+                return Err(Error::WrongState);
+            }
+            (
+                candidate.reads.unwrap_or(&[]),
+                candidate.writes.unwrap_or(&[]),
+            )
+        };
+
+        self.validate_declaration(reads)?;
+        self.validate_declaration(writes)?;
+
+        for running in &self.operations[..] {
+            if running.state != State::Running {
+                continue;
+            }
+            let running_reads = running.reads.unwrap_or(&[]);
+            let running_writes = running.writes.unwrap_or(&[]);
+            self.validate_declaration(running_reads)?;
+            self.validate_declaration(running_writes)?;
+            if Self::overlaps(writes, running_writes)
+                || Self::overlaps(writes, running_reads)
+                || Self::overlaps(reads, running_writes)
+            {
+                return Err(Error::Conflict);
+            }
+        }
+
+        self.operation_mut(operation)?.state = State::Running;
+        Ok(())
+    }
+
+    fn overlaps(left: &[ResourceId], right: &[ResourceId]) -> bool {
+        left.iter()
+            .any(|resource| right.iter().any(|other| resource.slot() == other.slot()))
+    }
+
     fn validate_declaration(&self, declaration: &[ResourceId]) -> Result<(), Error> {
         for (index, resource) in declaration.iter().enumerate() {
             self.resource(*resource)?;
@@ -155,6 +207,17 @@ impl<'a, T: Copy> Model<'a, T> {
         let operation = self
             .operations
             .get(identity.slot())
+            .ok_or(Error::OperationOutOfRange)?;
+        if operation.generation != identity.generation() {
+            return Err(Error::StaleOperation);
+        }
+        Ok(operation)
+    }
+
+    fn operation_mut(&mut self, identity: OperationId) -> Result<&mut Operation<'a>, Error> {
+        let operation = self
+            .operations
+            .get_mut(identity.slot())
             .ok_or(Error::OperationOutOfRange)?;
         if operation.generation != identity.generation() {
             return Err(Error::StaleOperation);
