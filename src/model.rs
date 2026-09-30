@@ -72,6 +72,11 @@ impl<'a, T: Copy> Model<'a, T> {
         operations: &'a mut [Operation<'a>],
         stages: &'a mut [Stage<T>],
     ) -> Self {
+        // Constructing a model starts a fresh staging lifetime. Never let a
+        // stage from a previous model match a newly reused identity.
+        for stage in stages.iter_mut() {
+            *stage = Stage::empty();
+        }
         Self {
             resources,
             operations,

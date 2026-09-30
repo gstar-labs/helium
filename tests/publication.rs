@@ -6,6 +6,9 @@ fn id(slot: usize, generation: u64) -> ResourceId {
     ResourceId::new(slot, generation)
 }
 
+static EMPTY: [ResourceId; 0] = [];
+static WRITE_X: [ResourceId; 1] = [ResourceId::new(0, 0)];
+
 #[test]
 fn staging_is_private_and_read_your_writes() {
     let mut resources = [Resource::new(0, 11_u32)];
@@ -171,6 +174,70 @@ fn abort_discards_stages_and_releases() {
     assert_eq!(model.inspect(x), Ok(11));
     assert_eq!(model.state(writer_op), Ok(State::Failed));
     model.admit(reader).expect("reader admits after abort");
+}
+
+#[test]
+fn constructing_a_model_hides_stages_from_a_previous_model() {
+    let mut stages = [Stage::empty()];
+    {
+        let mut resources = [Resource::new(0, 11_u32)];
+        let mut operations = [Operation::vacant()];
+        let x = id(0, 0);
+        let mut old_model = Model::new(&mut resources, &mut operations, &mut stages);
+        let old_operation = old_model
+            .register(&EMPTY, &WRITE_X)
+            .expect("old operation registers");
+        old_model
+            .admit(old_operation)
+            .expect("old operation admits");
+        old_model
+            .stage(old_operation, x, 23)
+            .expect("old write stages");
+    }
+
+    let mut resources = [Resource::new(0, 11_u32)];
+    let mut operations = [Operation::vacant()];
+    let x = id(0, 0);
+    let mut model = Model::new(&mut resources, &mut operations, &mut stages);
+    let operation = model
+        .register(&EMPTY, &WRITE_X)
+        .expect("new operation registers");
+    model.admit(operation).expect("new operation admits");
+
+    assert_eq!(model.view(operation, x), Err(Error::UndeclaredRead));
+    assert_eq!(model.inspect(x), Ok(11));
+}
+
+#[test]
+fn constructing_a_model_drops_stages_before_unstaged_commit() {
+    let mut stages = [Stage::empty()];
+    {
+        let mut resources = [Resource::new(0, 11_u32)];
+        let mut operations = [Operation::vacant()];
+        let x = id(0, 0);
+        let mut old_model = Model::new(&mut resources, &mut operations, &mut stages);
+        let old_operation = old_model
+            .register(&EMPTY, &WRITE_X)
+            .expect("old operation registers");
+        old_model
+            .admit(old_operation)
+            .expect("old operation admits");
+        old_model
+            .stage(old_operation, x, 23)
+            .expect("old write stages");
+    }
+
+    let mut resources = [Resource::new(0, 11_u32)];
+    let mut operations = [Operation::vacant()];
+    let x = id(0, 0);
+    let mut model = Model::new(&mut resources, &mut operations, &mut stages);
+    let operation = model
+        .register(&EMPTY, &WRITE_X)
+        .expect("new operation registers");
+    model.admit(operation).expect("new operation admits");
+    model.commit(operation).expect("new operation commits");
+
+    assert_eq!(model.inspect(x), Ok(11));
 }
 
 #[test]
