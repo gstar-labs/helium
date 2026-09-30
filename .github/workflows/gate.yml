@@ -18,7 +18,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt clippy llvm-tools --target thumbv7em-none-eabi
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy,llvm-tools --target thumbv7em-none-eabi
       - name: Branch name
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
